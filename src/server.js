@@ -17,7 +17,7 @@ const { Store } = require('./store');
 
 class TinyRedisServer {
   constructor(options = {}) {
-    this.port = options.port || 6379;
+    this.port = options.port ?? 6379;
     this.aofPath = options.aofPath || null;
     this.store = options.store || new Store();
     this.pubsub = options.pubsub || new PubSub();
