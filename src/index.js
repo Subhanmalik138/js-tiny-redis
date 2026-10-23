@@ -5,5 +5,6 @@ module.exports = {
   ...require('./protocol'),
   ...require('./commands'),
   ...require('./persistence'),
+  ...require('./pubsub'),
   ...require('./server'),
 };

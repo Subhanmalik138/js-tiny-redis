@@ -3,14 +3,16 @@
 /**
  * TCP server for the tiny-redis wire protocol.
  *
- * Each connection gets its own CommandHandler over the shared store.
- * Node's single thread makes each command atomic, which is exactly
- * how real Redis gets away with it.
+ * Each connection gets a session object that carries its CommandHandler
+ * plus per-connection state (transactions, subscriptions — added later).
+ * The store is shared across connections; Node's single thread makes each
+ * command atomic, which is exactly how real Redis gets away with it.
  */
 const net = require('net');
 const { parseLine, encodeReply } = require('./protocol');
-const { CommandHandler } = require('./commands');
+const { CommandHandler, ExecOutcome } = require('./commands');
 const { replayLog, makeAppender } = require('./persistence');
+const { PubSub } = require('./pubsub');
 const { Store } = require('./store');
 
 class TinyRedisServer {
@@ -18,6 +20,7 @@ class TinyRedisServer {
     this.port = options.port || 6379;
     this.aofPath = options.aofPath || null;
     this.store = options.store || new Store();
+    this.pubsub = options.pubsub || new PubSub();
     this.sweepIntervalMs = options.sweepIntervalMs || 1000;
     this.sessions = new Map();
     this.appender = this.aofPath ? makeAppender(this.aofPath) : null;
@@ -46,7 +49,8 @@ class TinyRedisServer {
   }
 
   _onConnection(socket) {
-    const session = { handler: new CommandHandler(this.store), multi: null, subscriptions: new Set() };
+    const handler = new CommandHandler(this.store, this.pubsub);
+    const session = { handler, multi: null, subscriptions: new Set(), send: (line) => socket.write(line) };
     this.sessions.set(socket, session);
     let buffer = '';
 
@@ -61,6 +65,7 @@ class TinyRedisServer {
     });
 
     socket.on('close', () => {
+      this.pubsub.unsubscribeAll(session);
       this.sessions.delete(socket);
     });
     socket.on('error', () => {});
@@ -85,12 +90,20 @@ class TinyRedisServer {
 
     let reply;
     try {
-      reply = session.handler.execute(tokens, session);
+      reply = session.handler.execute(tokens, session, line);
     } catch (err) {
       reply = err;
     }
 
-    if (!(reply instanceof Error) && this.appender && CommandHandler.isWriteCommand(tokens)) {
+    if (reply instanceof ExecOutcome) {
+      if (this.appender) {
+        for (const raw of reply.writeLines) this.appender.append(raw);
+      }
+      socket.write(encodeReply(reply.replies));
+      return;
+    }
+
+    if (!(reply instanceof Error) && this.appender && !session.multi && CommandHandler.isWriteCommand(tokens)) {
       this.appender.append(line);
     }
     socket.write(encodeReply(reply));
